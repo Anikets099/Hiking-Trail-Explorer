@@ -30,6 +30,7 @@ export default function TrailDetails() {
   const navigate = useNavigate();
   const { getTrailById, isFavorite, toggleFavorite } = useTrails();
   const { user } = useAuth();
+  const backendBaseUrl = (import.meta.env.VITE_API_URL || '').replace(/\/api$/, '');
 
   const [trail, setTrail] = useState(null);
   const [reviews, setReviews] = useState([]);
@@ -444,7 +445,7 @@ export default function TrailDetails() {
                   <div className="review-author-wrap">
                     <div className="review-avatar">
                       <img
-                        src={rev.user?.profileImage ? (rev.user.profileImage.startsWith('/uploads/') ? `http://localhost:5000${rev.user.profileImage}` : rev.user.profileImage) : "/images/avatar.png"}
+                        src={rev.user?.profileImage ? (rev.user.profileImage.startsWith('/uploads/') ? `${backendBaseUrl}${rev.user.profileImage}` : rev.user.profileImage) : "/images/avatar.png"}
                         alt={rev.user?.name || "Trekker"}
                         onError={(e) => {
                           e.target.src = "/images/avatar.png";

@@ -1,5 +1,13 @@
 # React + Vite
 
+## API configuration
+
+For local development, run the backend on port 5000 and use `VITE_API_URL=/api`.
+The Vite development server proxies `/api` and `/uploads` requests to that backend.
+For a deployed frontend, set `VITE_API_URL` to the current backend API URL ending in
+`/api` before building. Do not use a Render hostname unless that backend service exists
+and its hostname resolves.
+
 This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 
 Currently, two official plugins are available:

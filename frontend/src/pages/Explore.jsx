@@ -20,6 +20,7 @@ export default function Explore() {
   const [userToSearchDistance, setUserToSearchDistance] = useState(null);
 
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [hasSearched, setHasSearched] = useState(Boolean(initialSearch));
   const [isLocating, setIsLocating] = useState(false);
 
@@ -27,32 +28,40 @@ export default function Explore() {
   const loadData = useCallback(
     async (overrideSearch) => {
       setLoading(true);
+      setLoadError("");
       const querySearch = overrideSearch !== undefined ? overrideSearch : searchTerm;
 
-      const res = await fetchTrails({
-        search: querySearch.trim(),
-        difficulty: difficultyFilter,
-        distance: distanceFilter,
-        sortBy
-      });
+      try {
+        const res = await fetchTrails({
+          search: querySearch.trim(),
+          difficulty: difficultyFilter,
+          distance: distanceFilter,
+          sortBy
+        });
 
-      const trailList = res.results || res.data || (Array.isArray(res) ? res : []);
-      setTrails(trailList);
+        const trailList = res.results || res.data || (Array.isArray(res) ? res : []);
+        setTrails(trailList);
 
-      if (res.searchLocation) {
-        setSearchLocation(res.searchLocation);
-      } else if (!querySearch.trim()) {
+        if (res.searchLocation) {
+          setSearchLocation(res.searchLocation);
+        } else if (!querySearch.trim()) {
+          setSearchLocation(null);
+        }
+
+        if (res.distanceFromUserToSearch) {
+          setUserToSearchDistance(res.distanceFromUserToSearch);
+        } else {
+          setUserToSearchDistance(null);
+        }
+      } catch (error) {
+        setTrails([]);
         setSearchLocation(null);
-      }
-
-      if (res.distanceFromUserToSearch) {
-        setUserToSearchDistance(res.distanceFromUserToSearch);
-      } else {
+        setLoadError(error.message || "Unable to connect to the trail service.");
         setUserToSearchDistance(null);
+      } finally {
+        setLoading(false);
+        setHasSearched(Boolean(querySearch.trim()));
       }
-
-      setLoading(false);
-      setHasSearched(Boolean(querySearch.trim()));
     },
     [fetchTrails, searchTerm, difficultyFilter, distanceFilter, sortBy]
   );
@@ -100,17 +109,25 @@ export default function Explore() {
         } else {
           // If no search is active, discover nearby trails around user's GPS position
           setLoading(true);
-          const nearbyRes = await fetchNearbyTrails(latitude, longitude, 30);
-          const nearbyList = nearbyRes.results || nearbyRes.data || (Array.isArray(nearbyRes) ? nearbyRes : []);
-          setTrails(nearbyList);
-          setSearchLocation({
-            name: "Your Current Area",
-            latitude,
-            longitude
-          });
-          setUserToSearchDistance(null);
-          setLoading(false);
-          setHasSearched(true);
+          setLoadError("");
+          try {
+            const nearbyRes = await fetchNearbyTrails(latitude, longitude, 30);
+            const nearbyList = nearbyRes.results || nearbyRes.data || (Array.isArray(nearbyRes) ? nearbyRes : []);
+            setTrails(nearbyList);
+            setSearchLocation({
+              name: "Your Current Area",
+              latitude,
+              longitude
+            });
+            setUserToSearchDistance(null);
+            setHasSearched(true);
+          } catch (error) {
+            setTrails([]);
+            setSearchLocation(null);
+            setLoadError(error.message || "Unable to connect to the trail service.");
+          } finally {
+            setLoading(false);
+          }
         }
       },
       (error) => {
@@ -261,10 +278,12 @@ export default function Explore() {
             <AlertCircle size={28} />
           </div>
           <h3 style={{ fontSize: "1.3rem", fontWeight: 700, marginBottom: "8px", color: "var(--text-main)" }}>
-            No hiking places found near this location
+            {loadError ? "Trail search is unavailable" : "No hiking places found near this location"}
           </h3>
           <p style={{ color: "var(--text-muted)", fontSize: "0.95rem", marginBottom: "20px" }}>
-            {hasSearched && searchTerm.trim()
+            {loadError
+              ? `${loadError} Check that the backend is running and VITE_API_URL points to the correct API.`
+              : hasSearched && searchTerm.trim()
               ? `No hiking trails or outdoor places found near "${searchTerm}". Try searching for another city.`
               : "No hiking places found matching the current search criteria."}
           </p>

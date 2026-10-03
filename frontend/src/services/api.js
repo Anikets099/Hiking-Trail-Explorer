@@ -1,4 +1,6 @@
-const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+// Use Vite's same-origin proxy locally; production builds should set VITE_API_URL
+// to the deployed backend's full API URL.
+const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
 /**
  * Universal API Request Wrapper with JWT Header Injection

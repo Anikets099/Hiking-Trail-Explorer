@@ -1,6 +1,11 @@
-// Use Vite's same-origin proxy locally; production builds should set VITE_API_URL
-// to the deployed backend's full API URL.
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+// Use the Vite proxy locally. Production must call the deployed API directly;
+// relative URLs such as /api point back to the static frontend host.
+const productionApiUrl = 'https://hiking-trail-explorer-backend.onrender.com/api';
+const configuredApiUrl = import.meta.env.VITE_API_URL?.trim().replace(/\/+$/, '');
+const API_BASE_URL =
+  import.meta.env.PROD && (!configuredApiUrl || configuredApiUrl.startsWith('/'))
+    ? productionApiUrl
+    : configuredApiUrl || '/api';
 
 /**
  * Universal API Request Wrapper with JWT Header Injection

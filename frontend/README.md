@@ -4,9 +4,10 @@
 
 For local development, run the backend on port 5000 and use `VITE_API_URL=/api`.
 The Vite development server proxies `/api` and `/uploads` requests to that backend.
-For a deployed frontend, set `VITE_API_URL` to the current backend API URL ending in
-`/api` before building. Do not use a Render hostname unless that backend service exists
-and its hostname resolves.
+Production builds use the deployed API at `https://hiking-trail-explorer-backend.onrender.com/api`
+by default. If deploying another backend, set `VITE_API_URL` to its full API URL ending in
+`/api` in the frontend host's build environment. A relative `/api` value is ignored in
+production because it would point to the static frontend host instead of the backend.
 
 This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 

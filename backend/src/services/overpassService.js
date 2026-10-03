@@ -9,12 +9,15 @@ const { calculateDistance } = require('../utils/distance');
 // In-memory cache for Overpass query results
 const overpassCache = new Map();
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const FAILURE_CACHE_TTL_MS = 2 * 60 * 1000; // avoid repeatedly hitting overloaded public instances
+const ENDPOINT_TIMEOUT_MS = 9000;
+const MAX_UPSTREAM_WAIT_MS = 20000;
 
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
   'https://lz4.overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://maps.mail.ru/osm/tools/overpass/api/interpreter'
+  'https://overpass.kumi.systems/api/interpreter'
 ];
 
 const GENERIC_EXCLUDED_NAMES = new Set([
@@ -171,56 +174,69 @@ async function fetchNearbyTrailsFromOverpass(latitude, longitude, radiusKm = 25,
     const cacheKey = `${latitude.toFixed(2)}_${longitude.toFixed(2)}_${radiusMeters}`;
 
     const cached = overpassCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+    if (cached && Date.now() - cached.timestamp < (cached.ttl || CACHE_TTL_MS)) {
       return cached.data;
     }
 
     // Fast, targeted Overpass QL query
-    const overpassQuery = `[out:json][timeout:12];
+    const overpassQuery = `[out:json][timeout:15];
 (
-  node["natural"="peak"](around:${radiusMeters},${latitude},${longitude});
-  node["historic"="fort"](around:${radiusMeters},${latitude},${longitude});
-  node["tourism"="viewpoint"](around:${radiusMeters},${latitude},${longitude});
-  node["leisure"="nature_reserve"](around:${radiusMeters},${latitude},${longitude});
-  node["tourism"="attraction"](around:${radiusMeters},${latitude},${longitude});
+  nwr["natural"~"^(peak|cliff)$"]["name"](around:${radiusMeters},${latitude},${longitude});
+  nwr["historic"~"^(fort|castle)$"]["name"](around:${radiusMeters},${latitude},${longitude});
+  nwr["tourism"~"^(viewpoint|attraction)$"]["name"](around:${radiusMeters},${latitude},${longitude});
+  nwr["leisure"="nature_reserve"]["name"](around:${radiusMeters},${latitude},${longitude});
   way["highway"="path"]["name"](around:${radiusMeters},${latitude},${longitude});
   way["highway"="track"]["name"](around:${radiusMeters},${latitude},${longitude});
-  relation["route"="hiking"](around:${radiusMeters},${latitude},${longitude});
-  relation["route"="foot"](around:${radiusMeters},${latitude},${longitude});
+  relation["route"~"^(hiking|foot)$"]["name"](around:${radiusMeters},${latitude},${longitude});
 );
 out center 35;`;
 
     let data = null;
+    const endpointFailures = [];
+    const requestDeadline = Date.now() + MAX_UPSTREAM_WAIT_MS;
 
     for (const endpoint of OVERPASS_ENDPOINTS) {
+      const remainingMs = requestDeadline - Date.now();
+      if (remainingMs <= 0) break;
+
+      let timeoutId;
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s timeout
+        timeoutId = setTimeout(() => controller.abort(), Math.min(ENDPOINT_TIMEOUT_MS, remainingMs));
 
         const response = await fetch(endpoint, {
           method: 'POST',
           body: `data=${encodeURIComponent(overpassQuery)}`,
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
-            'User-Agent': 'TrailExplorer/1.0 (student-project; education)'
+            'User-Agent': 'TrailExplorer/1.0 (+https://github.com/Anikets099/Hiking-Trail-Explorer)'
           },
           signal: controller.signal
         });
-
-        clearTimeout(timeoutId);
 
         if (response.ok) {
           data = await response.json();
           if (data && Array.isArray(data.elements)) {
             break;
           }
+          endpointFailures.push(`${new URL(endpoint).hostname}: invalid JSON response`);
+        } else {
+          endpointFailures.push(`${new URL(endpoint).hostname}: HTTP ${response.status}`);
         }
       } catch (err) {
-        console.warn(`Overpass endpoint ${endpoint} failed: ${err.message}. Trying next endpoint...`);
+        endpointFailures.push(`${new URL(endpoint).hostname}: ${err.name === 'AbortError' ? 'timeout' : err.message}`);
+      } finally {
+        clearTimeout(timeoutId);
       }
     }
 
     if (!data || !Array.isArray(data.elements)) {
+      overpassCache.set(cacheKey, {
+        data: [],
+        timestamp: Date.now(),
+        ttl: FAILURE_CACHE_TTL_MS
+      });
+      console.warn(`Overpass unavailable; using curated trail results only. ${endpointFailures.join('; ')}`);
       return [];
     }
 
@@ -257,7 +273,8 @@ out center 35;`;
     // Cache the normalized results
     overpassCache.set(cacheKey, {
       data: uniqueTrails,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      ttl: CACHE_TTL_MS
     });
 
     return uniqueTrails;

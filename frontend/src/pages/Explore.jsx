@@ -38,6 +38,9 @@ export default function Explore() {
           distance: distanceFilter,
           sortBy
         });
+        if (res.success === false) {
+          throw new Error(res.message || "Unable to load trails from the service.");
+        }
 
         const trailList = res.results || res.data || (Array.isArray(res) ? res : []);
         setTrails(trailList);
@@ -112,6 +115,9 @@ export default function Explore() {
           setLoadError("");
           try {
             const nearbyRes = await fetchNearbyTrails(latitude, longitude, 30);
+            if (nearbyRes.success === false) {
+              throw new Error(nearbyRes.message || "Unable to load nearby trails.");
+            }
             const nearbyList = nearbyRes.results || nearbyRes.data || (Array.isArray(nearbyRes) ? nearbyRes : []);
             setTrails(nearbyList);
             setSearchLocation({

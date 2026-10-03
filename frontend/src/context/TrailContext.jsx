@@ -113,7 +113,7 @@ export function TrailProvider({ children }) {
         return res;
       } catch (error) {
         setLoading(false);
-        return { success: false, data: [], results: [] };
+        return { success: false, message: error.message || 'Unable to load trails.', data: [], results: [] };
       }
     },
     [userLocation]
@@ -127,7 +127,7 @@ export function TrailProvider({ children }) {
       return res;
     } catch (error) {
       setLoading(false);
-      return { success: false, data: [], results: [] };
+      return { success: false, message: error.message || 'Unable to load nearby trails.', data: [], results: [] };
     }
   };
 

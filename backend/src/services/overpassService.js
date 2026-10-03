@@ -10,7 +10,8 @@ const { calculateDistance } = require('../utils/distance');
 const overpassCache = new Map();
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const FAILURE_CACHE_TTL_MS = 2 * 60 * 1000; // avoid repeatedly hitting overloaded public instances
-const ENDPOINT_TIMEOUT_MS = 9000;
+// Allow a little headroom beyond the Overpass-side query timeout for network transit.
+const ENDPOINT_TIMEOUT_MS = 10000;
 const MAX_UPSTREAM_WAIT_MS = 20000;
 
 const OVERPASS_ENDPOINTS = [
@@ -179,7 +180,7 @@ async function fetchNearbyTrailsFromOverpass(latitude, longitude, radiusKm = 25,
     }
 
     // Fast, targeted Overpass QL query
-    const overpassQuery = `[out:json][timeout:15];
+    const overpassQuery = `[out:json][timeout:8];
 (
   nwr["natural"~"^(peak|cliff)$"]["name"](around:${radiusMeters},${latitude},${longitude});
   nwr["historic"~"^(fort|castle)$"]["name"](around:${radiusMeters},${latitude},${longitude});

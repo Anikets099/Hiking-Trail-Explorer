@@ -13,8 +13,10 @@ const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 // back off briefly instead of answering every search with a cached failure.
 const FAILURE_CACHE_TTL_MS = 30 * 1000;
 // Each instance gets a bounded sequential window so the aggregate wait stays limited.
-const ENDPOINT_TIMEOUTS_MS = [6000, 8500, 3500, 3500, 3500];
-const MAX_UPSTREAM_WAIT_MS = 25000;
+// The first instance gets the longest one: a dense area such as Pune takes it 5-6s,
+// and the fallbacks are frequently unreachable, so cutting it short fails the search.
+const ENDPOINT_TIMEOUTS_MS = [15000, 5000, 3500, 3500, 3500];
+const MAX_UPSTREAM_WAIT_MS = 30000;
 
 // Ordered by observed reliability: the French instance answers the trail query in ~3s,
 // while overpass-api.de rate-limits per IP and refuses connections from some hosts.
@@ -217,7 +219,7 @@ async function fetchNearbyTrailsFromOverpass(latitude, longitude, radiusKm = 25,
     // Routes and paths are output first so the element limit never drops them in favour
     // of the far more numerous points of interest.
     const searchRadiusKm = radiusMeters / 1000;
-    const overpassQuery = `[out:json][timeout:8][bbox:${getBoundingBox(latitude, longitude, searchRadiusKm)}];
+    const overpassQuery = `[out:json][timeout:14][bbox:${getBoundingBox(latitude, longitude, searchRadiusKm)}];
 (
   relation["route"~"^(hiking|foot)$"]["name"];
   way["highway"~"^(path|track)$"]["name"]["sac_scale"];

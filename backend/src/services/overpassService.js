@@ -12,18 +12,18 @@ const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 // Public instances fail transiently (HTTP 429/504) and recover within seconds, so only
 // back off briefly instead of answering every search with a cached failure.
 const FAILURE_CACHE_TTL_MS = 30 * 1000;
-// Keep the first-instance query timeout aligned with Overpass QL, then reserve
-// a shorter sequential window for each fallback so the aggregate stays bounded.
-// The main instance gets one last retry because a busy slot usually frees up quickly.
-const ENDPOINT_TIMEOUTS_MS = [8500, 3500, 3500, 3500, 8500];
+// Each instance gets a bounded sequential window so the aggregate wait stays limited.
+const ENDPOINT_TIMEOUTS_MS = [6000, 8500, 3500, 3500, 3500];
 const MAX_UPSTREAM_WAIT_MS = 25000;
 
+// Ordered by observed reliability: the French instance answers the trail query in ~3s,
+// while overpass-api.de rate-limits per IP and refuses connections from some hosts.
 const OVERPASS_ENDPOINTS = [
+  'https://overpass.openstreetmap.fr/api/interpreter',
   'https://overpass-api.de/api/interpreter',
-  'https://overpass.private.coffee/api/interpreter',
   'https://lz4.overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://overpass-api.de/api/interpreter'
+  'https://overpass.private.coffee/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter'
 ];
 
 const GENERIC_EXCLUDED_NAMES = new Set([
@@ -306,7 +306,9 @@ out center 80;`;
           console.error(`[overpass] provider error endpoint=${endpoint} status=${response.status} body=${responseText.slice(0, 500)}`);
         }
       } catch (err) {
-        const failure = `${new URL(endpoint).hostname}: ${err.name === 'AbortError' ? 'timeout' : err.message}`;
+        // fetch() reports network failures as "fetch failed"; the real reason is on err.cause
+        const reason = err.name === 'AbortError' ? 'timeout' : [err.message, err.cause?.code].filter(Boolean).join(' ');
+        const failure = `${new URL(endpoint).hostname}: ${reason}`;
         endpointFailures.push(failure);
         console.error(`[overpass] request failed endpoint=${endpoint} error=${failure}`);
       } finally {

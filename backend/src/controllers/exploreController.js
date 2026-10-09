@@ -2,9 +2,10 @@ const { geocodeCity } = require('../services/nominatimService');
 const { fetchNearbyTrailsFromOverpass } = require('../services/overpassService');
 const { searchWikimediaImage } = require('../services/wikimediaService');
 const { calculateDistance } = require('../utils/distance');
-const Trail = require('../models/Trail');
 
 const SEARCH_RADIUS_KM = parseInt(process.env.SEARCH_RADIUS_KM, 10) || 25;
+const NEARBY_RADIUS_KM = 25;
+const IMAGE_ENRICHMENT_TIMEOUT_MS = 3500;
 
 /**
  * Validates whether latitude and longitude are within legitimate geographical bounds
@@ -40,6 +41,10 @@ async function enrichTrailsWithImages(trails, cityName = '') {
 
   const enrichPromises = topTrails.map(async (trail) => {
     try {
+      if (trail.source === 'TrailExplorer curated') {
+        return trail;
+      }
+
       // If trail already has an authentic image (e.g. from MongoDB admin curation), keep it
       if (trail.imageUrl && !trail.imageUrl.includes('placeholder') && !trail.imageUrl.includes('rajgad')) {
         return trail;
@@ -71,6 +76,20 @@ async function enrichTrailsWithImages(trails, cityName = '') {
   return [...enrichedTop, ...remainingTrails];
 }
 
+async function enrichTrailsForSearch(trails, cityName) {
+  let timeoutId;
+  try {
+    return await Promise.race([
+      enrichTrailsWithImages(trails, cityName),
+      new Promise((resolve) => {
+        timeoutId = setTimeout(() => resolve(trails), IMAGE_ENRICHMENT_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // @desc    Dynamically discover hiking trails and nature places for any searched city
 // @route   GET /api/explore/search
 // @access  Public
@@ -88,12 +107,12 @@ exports.searchCityTrails = async (req, res, next) => {
     // Sanitize input string (max 100 chars, remove dangerous control characters)
     const cleanCity = city.trim().substring(0, 100).replace(/[<>%$^&*={}\[\]\\]/g, '');
 
-    // 1. Resolve city to geographic coordinates using Nominatim
+    console.info(`[trail-search] query=${JSON.stringify(cleanCity)}`);
     const searchLocation = await geocodeCity(cleanCity);
 
     if (!searchLocation) {
-      return res.status(200).json({
-        success: true,
+      const responseBody = {
+        success: false,
         searchLocation: null,
         location: null,
         userLocation: null,
@@ -101,56 +120,56 @@ exports.searchCityTrails = async (req, res, next) => {
         results: [],
         data: [],
         message: `Location "${cleanCity}" not found.`
-      });
+      };
+      console.info(`[trail-search] geocoding returned no match query=${JSON.stringify(cleanCity)}`);
+      return res.status(404).json(responseBody);
     }
 
-    const radiusKm = radius ? Math.min(100, Math.max(5, parseFloat(radius) || SEARCH_RADIUS_KM)) : SEARCH_RADIUS_KM;
+    console.info(
+      `[trail-search] geocoded query=${JSON.stringify(cleanCity)} location=${JSON.stringify(searchLocation.name)} latitude=${searchLocation.latitude} longitude=${searchLocation.longitude}`
+    );
 
-    // 2. Discover nearby trails, paths, viewpoints, peaks, and nature places via Overpass
-    const osmTrails = await fetchNearbyTrailsFromOverpass(
+    const parsedRadius = Number.parseFloat(radius);
+    const radiusKm = Math.min(
+      100,
+      Math.max(5, Number.isFinite(parsedRadius) && parsedRadius > 0 ? parsedRadius : SEARCH_RADIUS_KM)
+    );
+    console.info(`[trail-search] radiusKm=${radiusKm}`);
+
+    // 2. Discover hiking-related OSM features around the resolved coordinates.
+    const osmSearch = await fetchNearbyTrailsFromOverpass(
       searchLocation.latitude,
       searchLocation.longitude,
       radiusKm,
       searchLocation.name
     );
+    const osmTrails = osmSearch.trails;
 
-    // 3. Optional: Check if MongoDB has any curated trails near these coordinates
-    let dbTrails = [];
-    try {
-      const allDbTrails = await Trail.find({});
-      dbTrails = allDbTrails
-        .map((t) => {
-          const distFromSearch = calculateDistance(
-            searchLocation.latitude,
-            searchLocation.longitude,
-            t.latitude,
-            t.longitude
-          );
-          const obj = t.toObject();
-          obj.distFromSearch = distFromSearch;
-          return obj;
-        })
-        .filter((t) => t.distFromSearch <= radiusKm);
-    } catch (dbErr) {
-      // MongoDB optional check
+    if (!osmSearch.available) {
+      const error = new Error(
+        `OpenStreetMap trail search is temporarily unavailable for "${cleanCity}". Please try again shortly.`
+      );
+      error.statusCode = 503;
+      error.code = 'TRAIL_SEARCH_UNAVAILABLE';
+      error.searchDetails = JSON.stringify(osmSearch.errors || []);
+      error.diagnostics = {
+        geocoder: 'Nominatim',
+        searchLocation: {
+          name: searchLocation.name,
+          latitude: searchLocation.latitude,
+          longitude: searchLocation.longitude
+        },
+        searchRadiusKm: radiusKm,
+        overpassEndpoint: osmSearch.endpoint || null,
+        overpassStatus: osmSearch.status || null,
+        overpassErrors: osmSearch.errors || [],
+        osmElements: osmSearch.elementCount || 0
+      };
+      throw error;
     }
-
-    // Merge: Put DB curated trails first, then OSM trails not already in DB
-    const mergedTrails = [...dbTrails];
-    const dbNames = new Set(dbTrails.map((t) => t.name.toLowerCase()));
-
-    for (const osmTrail of osmTrails) {
-      if (!dbNames.has(osmTrail.name.toLowerCase())) {
-        if (!osmTrail.state && searchLocation.state) {
-          osmTrail.state = searchLocation.state;
-        }
-        mergedTrails.push(osmTrail);
-      }
-    }
-
 
     // 4. Enrich trails with dynamic Wikimedia Commons imagery
-    const enrichedTrails = await enrichTrailsWithImages(mergedTrails, searchLocation.name);
+    const enrichedTrails = await enrichTrailsForSearch(osmTrails, searchLocation.name);
 
     // 5. Compute DISTANCE B: Search Location -> Each Trail
     const formattedTrails = enrichedTrails.map((trail) => {
@@ -205,7 +224,7 @@ exports.searchCityTrails = async (req, res, next) => {
       }
     }
 
-    res.status(200).json({
+    const responseBody = {
       success: true,
       searchLocation: {
         name: searchLocation.name,
@@ -224,11 +243,31 @@ exports.searchCityTrails = async (req, res, next) => {
       distanceFromUserToSearch: distUserToSearchKm != null ? `${distUserToSearchKm} km` : null,
       distanceFromUserToSearchText: distUserToSearchText,
       count: formattedTrails.length,
+      sources: {
+        openStreetMap: osmSearch.available
+      },
+      diagnostics: {
+        geocoder: 'Nominatim',
+        latitude: searchLocation.latitude,
+        longitude: searchLocation.longitude,
+        searchRadiusKm: radiusKm,
+        overpassEndpoint: osmSearch.endpoint || null,
+        overpassStatus: osmSearch.status || null,
+        overpassErrors: osmSearch.errors || [],
+        osmElements: osmSearch.elementCount || 0,
+        osmTrails: osmTrails.length
+      },
       results: formattedTrails,
       data: formattedTrails
-    });
+    };
+    console.info(
+      `[trail-search] final-json ${JSON.stringify(responseBody)}`
+    );
+    return res.status(200).json(responseBody);
   } catch (error) {
-    console.error('Explore search error:', error.message);
+    console.error(
+      `[trail-search] failed query=${JSON.stringify(req.query.city || '')}: ${error.searchDetails || error.message}`
+    );
     next(error);
   }
 };
@@ -238,7 +277,7 @@ exports.searchCityTrails = async (req, res, next) => {
 // @access  Public
 exports.getNearbyTrailsDynamic = async (req, res, next) => {
   try {
-    const { lat, lng, radius = 25, userLat, userLng } = req.query;
+    const { lat, lng, radius = NEARBY_RADIUS_KM, userLat, userLng } = req.query;
 
     if (!isValidCoordinate(lat, lng)) {
       return res.status(400).json({
@@ -249,37 +288,33 @@ exports.getNearbyTrailsDynamic = async (req, res, next) => {
 
     const centerLat = parseFloat(lat);
     const centerLng = parseFloat(lng);
-    const radiusKm = Math.min(100, Math.max(5, parseFloat(radius) || SEARCH_RADIUS_KM));
+    const radiusKm = Math.min(100, Math.max(5, parseFloat(radius) || NEARBY_RADIUS_KM));
 
     // 1. Discover trails from OpenStreetMap around the center point
-    const osmTrails = await fetchNearbyTrailsFromOverpass(centerLat, centerLng, radiusKm, 'Nearby Area');
+    const osmSearch = await fetchNearbyTrailsFromOverpass(centerLat, centerLng, radiusKm, 'Nearby Area');
+    const osmTrails = osmSearch.trails;
 
-    // 2. Optional: Curated trails from MongoDB
-    let dbTrails = [];
-    try {
-      const allDbTrails = await Trail.find({});
-      dbTrails = allDbTrails
-        .map((t) => {
-          const distFromCenter = calculateDistance(centerLat, centerLng, t.latitude, t.longitude);
-          const obj = t.toObject();
-          obj.distFromCenter = distFromCenter;
-          return obj;
-        })
-        .filter((t) => t.distFromCenter <= radiusKm);
-    } catch (e) {}
-
-    // Merge curated and dynamic trails
-    const mergedTrails = [...dbTrails];
-    const dbNames = new Set(dbTrails.map((t) => t.name.toLowerCase()));
-
-    for (const osmTrail of osmTrails) {
-      if (!dbNames.has(osmTrail.name.toLowerCase())) {
-        mergedTrails.push(osmTrail);
-      }
+    if (!osmSearch.available) {
+      const error = new Error('Nearby trail search is temporarily unavailable because the live trail provider could not be reached.');
+      error.statusCode = 503;
+      error.code = 'TRAIL_SEARCH_UNAVAILABLE';
+      error.searchDetails = JSON.stringify(osmSearch.errors || []);
+      error.diagnostics = {
+        searchLocation: {
+          latitude: centerLat,
+          longitude: centerLng
+        },
+        searchRadiusKm: radiusKm,
+        overpassEndpoint: osmSearch.endpoint || null,
+        overpassStatus: osmSearch.status || null,
+        overpassErrors: osmSearch.errors || [],
+        osmElements: osmSearch.elementCount || 0
+      };
+      throw error;
     }
 
     // 3. Enrich with dynamic Wikimedia imagery
-    const enrichedTrails = await enrichTrailsWithImages(mergedTrails);
+    const enrichedTrails = await enrichTrailsForSearch(osmTrails, 'Nearby Area');
 
     // 4. Calculate distance from search center to each trail
     const formattedTrails = enrichedTrails
@@ -291,7 +326,7 @@ exports.getNearbyTrailsDynamic = async (req, res, next) => {
         item.distanceFromSearchText = distKm != null ? `${distKm} km away` : null;
         return item;
       })
-      .sort((a, b) => (a.distanceFromSearchKm || 9999) - (b.distanceFromSearchKm || 9999));
+      .sort((a, b) => (a.distanceFromSearchKm ?? 9999) - (b.distanceFromSearchKm ?? 9999));
 
     res.status(200).json({
       success: true,
@@ -306,6 +341,7 @@ exports.getNearbyTrailsDynamic = async (req, res, next) => {
         longitude: centerLng
       },
       count: formattedTrails.length,
+      sources: { openStreetMap: osmSearch.available },
       results: formattedTrails,
       data: formattedTrails
     });

@@ -1,5 +1,48 @@
 import { apiRequest } from './api';
 
+/**
+ * Applies the Explore difficulty / distance filters and sorting to a list of trails.
+ * Distance prefers distance from the searched location, then the trail's own length.
+ */
+export function filterAndSortTrails(trails, params = {}) {
+  let list = [...trails];
+
+  if (params.difficulty && params.difficulty !== 'all') {
+    const diffLower = params.difficulty.toLowerCase();
+    list = list.filter((t) => (t.difficulty || '').toLowerCase().includes(diffLower));
+  }
+
+  const getDistance = (trail) =>
+    Number.isFinite(trail.distanceFromSearchKm)
+      ? trail.distanceFromSearchKm
+      : Number.isFinite(trail.distanceNum)
+        ? trail.distanceNum
+        : null;
+
+  if (params.distance && params.distance !== 'all') {
+    list = list.filter((trail) => {
+      const distance = getDistance(trail);
+      if (distance === null) return false;
+      if (params.distance === 'under5') return distance < 5;
+      if (params.distance === '5to10') return distance >= 5 && distance <= 10;
+      if (params.distance === 'above10') return distance > 10;
+      return true;
+    });
+  }
+
+  if (params.sortBy === 'distance') {
+    list.sort(
+      (a, b) => (getDistance(a) ?? Number.POSITIVE_INFINITY) - (getDistance(b) ?? Number.POSITIVE_INFINITY)
+    );
+  } else if (params.sortBy === 'name') {
+    list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  } else if (params.sortBy === 'rating') {
+    list.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+  }
+
+  return list;
+}
+
 export const trailService = {
   /**
    * Main Trail Search & Filter Service
@@ -19,36 +62,7 @@ export const trailService = {
       const res = await apiRequest(`/explore/search?${query.toString()}`);
       let trails = res.results || res.data || [];
 
-      // Apply difficulty filter
-      if (params.difficulty && params.difficulty !== 'all') {
-        const diffLower = params.difficulty.toLowerCase();
-        trails = trails.filter((t) => (t.difficulty || '').toLowerCase().includes(diffLower));
-      }
-
-      // Apply distance filter (distance from searched location)
-      if (params.distance && params.distance !== 'all') {
-        if (params.distance === 'under5') {
-          trails = trails.filter((t) => (t.distanceFromSearchKm || t.distanceNum || 5) < 5.0);
-        } else if (params.distance === '5to10') {
-          trails = trails.filter(
-            (t) =>
-              (t.distanceFromSearchKm || t.distanceNum || 5) >= 5.0 &&
-              (t.distanceFromSearchKm || t.distanceNum || 5) <= 10.0
-          );
-        } else if (params.distance === 'above10') {
-          trails = trails.filter((t) => (t.distanceFromSearchKm || t.distanceNum || 5) > 10.0);
-        }
-      }
-
-      // Apply sorting (distance from searched location)
-      if (params.sortBy === 'distance') {
-        trails.sort((a, b) => (a.distanceFromSearchKm || 9999) - (b.distanceFromSearchKm || 9999));
-      } else if (params.sortBy === 'name') {
-        trails.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-      } else {
-        // Default sort by rating descending
-        trails.sort((a, b) => (b.rating || 0) - (a.rating || 0));
-      }
+      trails = filterAndSortTrails(trails, params);
 
       return {
         success: true,
@@ -58,24 +72,23 @@ export const trailService = {
         distanceFromUserToSearchKm: res.distanceFromUserToSearchKm,
         distanceFromUserToSearch: res.distanceFromUserToSearch,
         distanceFromUserToSearchText: res.distanceFromUserToSearchText,
+        sources: res.sources,
         count: trails.length,
         results: trails,
         data: trails
       };
     }
 
-    // When no search active, fetch popular / curated trails
-    const query = new URLSearchParams();
-    if (params.difficulty && params.difficulty !== 'all') query.append('difficulty', params.difficulty);
-    if (params.distance && params.distance !== 'all') query.append('distance', params.distance);
-    if (params.sortBy) query.append('sortBy', params.sortBy);
-    if (params.lat != null && params.lng != null) {
-      query.append('lat', params.lat);
-      query.append('lng', params.lng);
-    }
+    // When no search active, fetch popular / curated trails.
+    // The popular endpoint has no filter support, so filters are applied here.
+    const res = await trailService.getPopularTrails(params);
+    const trails = filterAndSortTrails(res.data || [], params);
+    return { ...res, count: trails.length, data: trails };
+  },
 
-    const qs = query.toString() ? `?${query.toString()}` : '';
-    return await apiRequest(`/trails/popular${qs}`);
+  // Every trail stored in the database (admin management)
+  async getAllTrails() {
+    return await apiRequest('/trails?sortBy=name');
   },
 
   async getPopularTrails(params = {}) {
@@ -91,16 +104,26 @@ export const trailService = {
   /**
    * Dynamic Nearby Trails Search via Overpass API
    */
-  async getNearbyTrails(lat, lng, radius = 25) {
-    return await apiRequest(`/explore/nearby?lat=${lat}&lng=${lng}&radius=${radius}`);
+  async getNearbyTrails(lat, lng, radius = 25, params = {}) {
+    const res = await apiRequest(`/explore/nearby?lat=${lat}&lng=${lng}&radius=${radius}`);
+    // Nearby results arrive sorted nearest-first; only re-sort when explicitly asked to
+    const trails = filterAndSortTrails(res.results || res.data || [], {
+      ...params,
+      sortBy: params.sortBy === 'name' ? 'name' : 'distance'
+    });
+    return { ...res, count: trails.length, results: trails, data: trails };
   },
 
   async getTrailById(id, queryParams = {}) {
     const query = new URLSearchParams();
     if (queryParams.name) query.append('name', queryParams.name);
     if (queryParams.city) query.append('city', queryParams.city);
+    if (queryParams.lat != null && queryParams.lng != null) {
+      query.append('lat', queryParams.lat);
+      query.append('lng', queryParams.lng);
+    }
     const qs = query.toString() ? `?${query.toString()}` : '';
-    return await apiRequest(`/trails/${id}${qs}`);
+    return await apiRequest(`/trails/${encodeURIComponent(id)}${qs}`);
   },
 
   async createTrail(trailData) {

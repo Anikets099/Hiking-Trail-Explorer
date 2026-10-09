@@ -25,7 +25,9 @@ export default function TrailCard({ trail, showRemoveBtn = false, onRemove }) {
   };
 
   const linkId = trail.slug || trail.id || trail._id;
-  const destinationUrl = `/trail/${linkId}?name=${encodeURIComponent(trail.name || '')}&city=${encodeURIComponent(trail.city || trail.searchOriginName || '')}`;
+  const coordsQuery =
+    trail.latitude != null && trail.longitude != null ? `&lat=${trail.latitude}&lng=${trail.longitude}` : '';
+  const destinationUrl = `/trail/${encodeURIComponent(linkId)}?name=${encodeURIComponent(trail.name || '')}&city=${encodeURIComponent(trail.city || trail.searchOriginName || '')}${coordsQuery}`;
 
   // Clean trail name to avoid ugly "Osm node [id]"
   const cleanTrailName = (name) => {
@@ -98,7 +100,7 @@ export default function TrailCard({ trail, showRemoveBtn = false, onRemove }) {
 
         <div className="trail-card-rating">
           <Star size={15} className="rating-star" />
-          <span>{trail.rating || 4.8}</span>
+          <span>{trail.rating ? Number(trail.rating).toFixed(1) : "New"}</span>
           <span className="rating-count">
             {trail.type ? `• ${trail.type}` : `(${trail.reviewCount || trail.reviewsCount || trail.reviews?.length || 0})`}
           </span>
@@ -137,7 +139,7 @@ export default function TrailCard({ trail, showRemoveBtn = false, onRemove }) {
           </span>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
             <Ruler size={13} style={{ color: "var(--text-muted)" }} />
-            {trail.distance || "5.0 km"}
+            {trail.distance || "Not listed"}
           </span>
           {trail.elevation && (
             <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
@@ -157,7 +159,7 @@ export default function TrailCard({ trail, showRemoveBtn = false, onRemove }) {
           </Link>
           {showRemoveBtn && (
             <button
-              onClick={() => onRemove && onRemove(trailId)}
+              onClick={() => onRemove && onRemove(trailId, trail)}
               className="btn btn-danger btn-sm"
               title="Remove from favorites"
             >

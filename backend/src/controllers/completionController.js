@@ -197,7 +197,10 @@ exports.markCompleted = async (req, res, next) => {
       } catch (err) {
         trail = await Trail.findOne({ slug });
       }
-    } else if (/^osm/i.test(trail.name) && cleanName && !/^osm/i.test(cleanName)) {
+    } else if (
+      (/^osm/i.test(trail.name) || trail.name === 'Scenic Nature Trail') &&
+      cleanName && cleanName !== trail.name && !/^osm/i.test(cleanName)
+    ) {
       trail.name = cleanName;
       if (cleanCity && cleanCity !== 'India') trail.city = cleanCity;
       if (cleanImg && !cleanImg.includes('default') && (!trail.imageUrl || trail.imageUrl.includes('default'))) {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useTrails } from "../context/TrailContext";
 import TrailCard from "../components/TrailCard";
@@ -21,55 +21,71 @@ export default function Explore() {
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [searchNotice, setSearchNotice] = useState("");
   const [hasSearched, setHasSearched] = useState(Boolean(initialSearch));
   const [isLocating, setIsLocating] = useState(false);
+  const [nearbyCenter, setNearbyCenter] = useState(null);
+  const requestIdRef = useRef(0);
 
   // Perform search query to backend
   const loadData = useCallback(
-    async (overrideSearch) => {
+    async (overrideSearch, overrideNearby) => {
+      // Only the most recent request may update the page; older responses are dropped
+      const requestId = ++requestIdRef.current;
+      const isStale = () => requestId !== requestIdRef.current;
+
       setLoading(true);
       setLoadError("");
-      const querySearch = overrideSearch !== undefined ? overrideSearch : searchTerm;
+      setSearchNotice("");
+      const querySearch = (overrideSearch !== undefined ? overrideSearch : searchTerm).trim();
+      const nearby = overrideNearby !== undefined ? overrideNearby : nearbyCenter;
+      const filters = { difficulty: difficultyFilter, distance: distanceFilter, sortBy };
+      // "Use My Location" without a search term browses trails around the user's GPS position
+      const useNearby = !querySearch && Boolean(nearby);
 
       try {
-        const res = await fetchTrails({
-          search: querySearch.trim(),
-          difficulty: difficultyFilter,
-          distance: distanceFilter,
-          sortBy
-        });
+        const res = useNearby
+          ? await fetchNearbyTrails(nearby.lat, nearby.lng, 30, filters)
+          : await fetchTrails({ search: querySearch, ...filters });
+        if (isStale()) return;
+
         if (res.success === false) {
-          throw new Error(res.message || "Unable to load trails from the service.");
+          const error = new Error(res.message || "Unable to load trails from the service.");
+          error.code = res.code;
+          throw error;
         }
 
         const trailList = res.results || res.data || (Array.isArray(res) ? res : []);
         setTrails(trailList);
-
-        if (res.searchLocation) {
-          setSearchLocation(res.searchLocation);
-        } else if (!querySearch.trim()) {
-          setSearchLocation(null);
+        if (res.sources?.openStreetMap === false && trailList.length > 0) {
+          setSearchNotice("Live OpenStreetMap search is temporarily unavailable. Showing available saved places.");
         }
 
-        if (res.distanceFromUserToSearch) {
-          setUserToSearchDistance(res.distanceFromUserToSearch);
+        if (useNearby) {
+          setSearchLocation({ name: "Your Current Area", latitude: nearby.lat, longitude: nearby.lng });
         } else {
-          setUserToSearchDistance(null);
+          setSearchLocation(querySearch ? res.searchLocation || null : null);
         }
+
+        setUserToSearchDistance(!useNearby && res.distanceFromUserToSearch ? res.distanceFromUserToSearch : null);
       } catch (error) {
+        if (isStale()) return;
         setTrails([]);
         setSearchLocation(null);
-        setLoadError(error.message || "Unable to connect to the trail service.");
+        setLoadError(`${error.message || "Unable to connect to the trail service."}${error.code ? ` (${error.code})` : ""}`);
+        setSearchNotice("");
         setUserToSearchDistance(null);
       } finally {
-        setLoading(false);
-        setHasSearched(Boolean(querySearch.trim()));
+        if (!isStale()) {
+          setLoading(false);
+          setHasSearched(Boolean(querySearch) || useNearby);
+        }
       }
     },
-    [fetchTrails, searchTerm, difficultyFilter, distanceFilter, sortBy]
+    [fetchTrails, fetchNearbyTrails, searchTerm, nearbyCenter, difficultyFilter, distanceFilter, sortBy]
   );
 
-  // Initial load or filter change
+  // Initial load, filter change, or new user location
   useEffect(() => {
     loadData();
   }, [difficultyFilter, distanceFilter, sortBy, userLocation]);
@@ -85,10 +101,11 @@ export default function Explore() {
 
   const handleClearSearch = () => {
     setSearchTerm("");
+    setNearbyCenter(null);
     setSearchLocation(null);
     setUserToSearchDistance(null);
     setSearchParams({});
-    loadData("");
+    loadData("", null);
   };
 
   // Browser Geolocation for "Use My Location"
@@ -100,43 +117,16 @@ export default function Explore() {
 
     setIsLocating(true);
     navigator.geolocation.getCurrentPosition(
-      async (position) => {
+      (position) => {
         const { latitude, longitude } = position.coords;
-        // Keep user coordinates in session state (separate from searchLocation)
-        setUserLocation({ lat: latitude, lng: longitude });
         setIsLocating(false);
-
-        // If a search query is already active, keep it and refresh distance from user -> search location
-        if (searchTerm && searchTerm.trim()) {
-          loadData(searchTerm.trim());
-        } else {
-          // If no search is active, discover nearby trails around user's GPS position
-          setLoading(true);
-          setLoadError("");
-          try {
-            const nearbyRes = await fetchNearbyTrails(latitude, longitude, 30);
-            if (nearbyRes.success === false) {
-              throw new Error(nearbyRes.message || "Unable to load nearby trails.");
-            }
-            const nearbyList = nearbyRes.results || nearbyRes.data || (Array.isArray(nearbyRes) ? nearbyRes : []);
-            setTrails(nearbyList);
-            setSearchLocation({
-              name: "Your Current Area",
-              latitude,
-              longitude
-            });
-            setUserToSearchDistance(null);
-            setHasSearched(true);
-          } catch (error) {
-            setTrails([]);
-            setSearchLocation(null);
-            setLoadError(error.message || "Unable to connect to the trail service.");
-          } finally {
-            setLoading(false);
-          }
-        }
+        // Keep user coordinates in session state (separate from searchLocation).
+        // The effect above reloads once they change: an active search is refreshed with the
+        // distance from the user, otherwise trails around the GPS position are discovered.
+        setNearbyCenter({ lat: latitude, lng: longitude });
+        setUserLocation({ lat: latitude, lng: longitude });
       },
-      (error) => {
+      () => {
         setIsLocating(false);
         alert("Unable to access your location. Please enable location permissions.");
       },
@@ -231,6 +221,22 @@ export default function Explore() {
         </div>
       )}
 
+      {searchNotice && (
+        <p
+          role="status"
+          style={{
+            padding: "12px 16px",
+            marginBottom: "20px",
+            color: "#854d0e",
+            backgroundColor: "#fefce8",
+            border: "1px solid #fde68a",
+            borderRadius: "var(--radius-md)"
+          }}
+        >
+          {searchNotice}
+        </p>
+      )}
+
       {loading ? (
         <div style={{ textAlign: "center", padding: "60px 20px" }}>
           <div
@@ -288,7 +294,7 @@ export default function Explore() {
           </h3>
           <p style={{ color: "var(--text-muted)", fontSize: "0.95rem", marginBottom: "20px" }}>
             {loadError
-              ? `${loadError} Check that the backend is running and VITE_API_URL points to the correct API.`
+              ? loadError
               : hasSearched && searchTerm.trim()
               ? `No hiking trails or outdoor places found near "${searchTerm}". Try searching for another city.`
               : "No hiking places found matching the current search criteria."}

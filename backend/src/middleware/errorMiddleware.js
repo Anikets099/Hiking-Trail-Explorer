@@ -2,10 +2,9 @@ const errorHandler = (err, req, res, next) => {
   let error = { ...err };
   error.message = err.message;
 
-  // Log error for developers in dev mode
-  if (process.env.NODE_ENV === 'development') {
-    console.error('Server Error:', err);
-  }
+  console.error(
+    `[api-error] ${req.method} ${req.originalUrl} status=${err.statusCode || 500} code=${err.code || 'UNEXPECTED_ERROR'} message=${err.searchDetails || err.message}`
+  );
 
   // Mongoose bad ObjectId / CastError
   if (err.name === 'CastError') {
@@ -49,10 +48,19 @@ const errorHandler = (err, req, res, next) => {
     });
   }
 
-  res.status(err.statusCode || 500).json({
+  const responseBody = {
     success: false,
     message: err.message || 'Internal Server Error'
-  });
+  };
+  if (['GEOCODING_UNAVAILABLE', 'TRAIL_SEARCH_UNAVAILABLE'].includes(err.code)) {
+    responseBody.code = err.code;
+  }
+  if (err.diagnostics) {
+    responseBody.diagnostics = err.diagnostics;
+  }
+
+  console.error(`[api-error] response=${JSON.stringify(responseBody)}`);
+  res.status(err.statusCode || 500).json(responseBody);
 };
 
 module.exports = errorHandler;

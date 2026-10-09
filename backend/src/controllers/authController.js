@@ -18,7 +18,10 @@ exports.register = async (req, res, next) => {
   try {
     const { name, email, password } = req.body;
 
-    if (!name || !email || !password) {
+    if (
+      typeof name !== 'string' || typeof email !== 'string' || typeof password !== 'string' ||
+      !name.trim() || !email.trim() || !password
+    ) {
       return res.status(400).json({
         success: false,
         message: 'Please provide full name, email, and password.'
@@ -85,7 +88,7 @@ exports.login = async (req, res, next) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password) {
+    if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) {
       return res.status(400).json({
         success: false,
         message: 'Please provide both email and password.'

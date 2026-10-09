@@ -1,21 +1,18 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { authService } from '../services/authService';
 import { userService } from '../services/userService';
+import { resolveUploadUrl } from '../services/api';
 
 const AuthContext = createContext();
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const backendBaseUrl = (import.meta.env.VITE_API_URL || '').replace(/\/api$/, '');
 
   // Helper to format profile image path (if uploaded to backend)
   const formatAvatarUrl = (img) => {
     if (!img) return '/images/avatar.png';
-    if (img.startsWith('/uploads/')) {
-      return `${backendBaseUrl}${img}`;
-    }
-    return img;
+    return resolveUploadUrl(img);
   };
 
   useEffect(() => {

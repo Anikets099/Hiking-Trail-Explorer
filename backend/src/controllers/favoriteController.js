@@ -119,24 +119,31 @@ exports.addFavorite = async (req, res, next) => {
     const cleanLat = incoming.latitude != null ? incoming.latitude : (trail ? trail.latitude : 18.5204);
     const cleanLng = incoming.longitude != null ? incoming.longitude : (trail ? trail.longitude : 73.8567);
 
-    // 2. If trail exists, update with incoming rich details
+    // 2. If trail exists, fill in missing details. Only auto-created OpenStreetMap records
+    //    take details from the request; curated trails must not be editable by any user.
     if (trail) {
-      if (cleanIncomingName) {
-        trail.name = cleanIncomingName;
-      } else if (/^osm/i.test(trail.name)) {
-        trail.name = cleanCity && cleanCity !== 'India' ? `${cleanCity} Scenic Trail` : 'Scenic Nature Trail';
+      const isOsmRecord = /^osm-/i.test(trail.externalId || '') || /^osm-/i.test(trail.slug || '');
+      const hasPlaceholderName = !trail.name || /^osm/i.test(trail.name) || /Scenic (Nature )?Trail$/.test(trail.name);
+
+      if (isOsmRecord) {
+        if (cleanIncomingName && hasPlaceholderName) {
+          trail.name = cleanIncomingName;
+        } else if (/^osm/i.test(trail.name)) {
+          trail.name = cleanCity && cleanCity !== 'India' ? `${cleanCity} Scenic Trail` : 'Scenic Nature Trail';
+        }
+
+        if (cleanCity && cleanCity !== 'India' && (!trail.city || trail.city === 'India')) trail.city = cleanCity;
+        if (cleanState && !trail.state) trail.state = cleanState;
+        if (Number.isFinite(Number(incoming.latitude)) && Number.isFinite(Number(incoming.longitude))) {
+          trail.latitude = Number(incoming.latitude);
+          trail.longitude = Number(incoming.longitude);
+        }
+        if (!trail.externalId) trail.externalId = externalId;
       }
 
-      if (cleanCity && cleanCity !== 'India') trail.city = cleanCity;
-      if (cleanState) trail.state = cleanState;
       if (cleanImg && !cleanImg.includes('rajgad') && (!trail.imageUrl || trail.imageUrl.includes('rajgad') || trail.imageUrl.includes('default'))) {
         trail.imageUrl = cleanImg;
       }
-      if (cleanLat && cleanLng) {
-        trail.latitude = cleanLat;
-        trail.longitude = cleanLng;
-      }
-      trail.externalId = externalId;
       await trail.save();
     } else {
       // 3. Create complete Trail document

@@ -5,6 +5,7 @@ import { useAuth } from "../context/AuthContext";
 import { reviewService } from "../services/reviewService";
 import { userService } from "../services/userService";
 import { completionService } from "../services/completionService";
+import { resolveUploadUrl } from "../services/api";
 import defaultTrailImage from "../assets/default-trail.jpg";
 import {
   ArrowLeft,
@@ -30,7 +31,6 @@ export default function TrailDetails() {
   const navigate = useNavigate();
   const { getTrailById, isFavorite, toggleFavorite } = useTrails();
   const { user } = useAuth();
-  const backendBaseUrl = (import.meta.env.VITE_API_URL || '').replace(/\/api$/, '');
 
   const [trail, setTrail] = useState(null);
   const [reviews, setReviews] = useState([]);
@@ -46,21 +46,40 @@ export default function TrailDetails() {
   const [submittingReview, setSubmittingReview] = useState(false);
 
   useEffect(() => {
+    // Ignore responses that arrive after navigating to another trail
+    let cancelled = false;
+
     const loadTrailData = async () => {
       setLoading(true);
+      setTrail(null);
+      setReviews([]);
+      setIsCompleted(false);
+      setActiveImageIndex(0);
       const queryName = searchParams.get("name") || "";
       const queryCity = searchParams.get("city") || "";
 
-      const data = await getTrailById(id, { name: queryName, city: queryCity });
+      const data = await getTrailById(id, {
+        name: queryName,
+        city: queryCity,
+        lat: searchParams.get("lat"),
+        lng: searchParams.get("lng")
+      });
+      if (cancelled) return;
+
       if (data) {
         setTrail(data);
+        const dataId = data._id || data.slug || id;
 
-        // Record explored trail for current user
         if (user) {
-          userService.recordTrailExplored(data._id || data.slug || id).catch(() => {});
-          completionService.checkCompletion(data._id || data.slug || id)
+          // Record explored trail for current user. Sending the trail details lets the
+          // backend store OpenStreetMap places under their real name and coordinates.
+          try {
+            await userService.recordTrailExplored(dataId, data);
+          } catch (e) {}
+
+          completionService.checkCompletion(dataId)
             .then((res) => {
-              if (res.success && res.completed) {
+              if (!cancelled && res.success && res.completed) {
                 setIsCompleted(true);
               }
             })
@@ -69,19 +88,22 @@ export default function TrailDetails() {
 
         // Load reviews
         try {
-          const revRes = await reviewService.getTrailReviews(data._id || data.slug || id);
-          if (revRes.success && revRes.data) {
+          const revRes = await reviewService.getTrailReviews(dataId);
+          if (!cancelled && revRes.success && revRes.data) {
             setReviews(revRes.data);
           }
         } catch (e) {
-          setReviews(data.reviews || []);
+          if (!cancelled) setReviews(data.reviews || []);
         }
       }
-      setLoading(false);
+      if (!cancelled) setLoading(false);
     };
 
     loadTrailData();
-  }, [id, searchParams, user]);
+    return () => {
+      cancelled = true;
+    };
+  }, [id, searchParams, user?._id]);
 
 
 
@@ -146,7 +168,15 @@ export default function TrailDetails() {
       });
 
       if (res.success && res.data) {
-        setReviews([res.data, ...reviews]);
+        const updatedReviews = [res.data, ...reviews];
+        setReviews(updatedReviews);
+        // Reflect the new average rating without reloading the page
+        const average = updatedReviews.reduce((sum, r) => sum + (r.rating || 0), 0) / updatedReviews.length;
+        setTrail((prev) => ({
+          ...prev,
+          rating: Number(average.toFixed(1)),
+          reviewCount: updatedReviews.length
+        }));
         setReviewComment("");
         setShowReviewForm(false);
       }
@@ -183,7 +213,7 @@ export default function TrailDetails() {
           <div className="details-meta-row">
             <div className="details-rating">
               <Star size={18} className="rating-star" />
-              <span>{trail.rating || 4.8}</span>
+              <span>{trail.rating ? Number(trail.rating).toFixed(1) : "New"}</span>
               <span className="rating-count">
                 ({trail.reviewCount || reviews.length || 0} reviews)
               </span>
@@ -205,22 +235,22 @@ export default function TrailDetails() {
             <div className="stat-card-box">
               <Ruler size={20} className="stat-card-icon" />
               <span className="stat-card-label">Distance</span>
-              <span className="stat-card-value">{trail.distance || "5.0 km"}</span>
+              <span className="stat-card-value">{trail.distance || "Not listed"}</span>
             </div>
             <div className="stat-card-box">
               <Mountain size={20} className="stat-card-icon" />
               <span className="stat-card-label">Elevation</span>
-              <span className="stat-card-value">{trail.elevation || "800 m"}</span>
+              <span className="stat-card-value">{trail.elevation || "Not listed"}</span>
             </div>
             <div className="stat-card-box">
               <Clock size={20} className="stat-card-icon" />
               <span className="stat-card-label">Time</span>
-              <span className="stat-card-value">{trail.hikingTime || "2-3 hrs"}</span>
+              <span className="stat-card-value">{trail.hikingTime || "Not listed"}</span>
             </div>
             <div className="stat-card-box">
               <Calendar size={20} className="stat-card-icon" />
               <span className="stat-card-label">Best Time</span>
-              <span className="stat-card-value">{trail.bestTime || "Oct - Mar"}</span>
+              <span className="stat-card-value">{trail.bestTime || "Not listed"}</span>
             </div>
           </div>
 
@@ -251,7 +281,16 @@ export default function TrailDetails() {
           {/* Buttons: View on Map, Save Trail, Mark as Completed */}
           <div className="details-actions" style={{ display: "flex", flexWrap: "wrap", gap: "12px" }}>
             <button
-              onClick={() => navigate(`/map?trail=${trail.slug || trail._id}`)}
+              onClick={() => {
+                const mapQuery = new URLSearchParams({ trail: trail.slug || trail._id });
+                if (trail.name) mapQuery.set("name", trail.name);
+                if (trail.city) mapQuery.set("city", trail.city);
+                if (trail.latitude != null && trail.longitude != null) {
+                  mapQuery.set("lat", trail.latitude);
+                  mapQuery.set("lng", trail.longitude);
+                }
+                navigate(`/map?${mapQuery.toString()}`);
+              }}
               className="btn btn-outline"
               style={{ minWidth: "140px" }}
             >
@@ -445,10 +484,11 @@ export default function TrailDetails() {
                   <div className="review-author-wrap">
                     <div className="review-avatar">
                       <img
-                        src={rev.user?.profileImage ? (rev.user.profileImage.startsWith('/uploads/') ? `${backendBaseUrl}${rev.user.profileImage}` : rev.user.profileImage) : "/images/avatar.png"}
+                        src={resolveUploadUrl(rev.user?.profileImage) || "/images/avatar.png"}
                         alt={rev.user?.name || "Trekker"}
                         onError={(e) => {
-                          e.target.src = "/images/avatar.png";
+                          e.currentTarget.onerror = null;
+                          e.currentTarget.src = "/images/avatar.png";
                         }}
                       />
                     </div>

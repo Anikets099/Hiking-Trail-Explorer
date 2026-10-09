@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { trailService } from '../services/trailService';
 import { favoriteService } from '../services/favoriteService';
 import { reviewService } from '../services/reviewService';
@@ -9,14 +9,24 @@ const TrailContext = createContext();
 export function TrailProvider({ children }) {
   const { user } = useAuth();
   const [popularTrails, setPopularTrails] = useState([]);
-  const [favorites, setFavorites] = useState([]);
+  const [favoriteGroups, setFavoriteGroups] = useState([]);
+  const [favoritesReady, setFavoritesReady] = useState(false);
   const [userLocation, setUserLocation] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  // Helper to normalize trail ID (supports both _id, id, and slug)
-  const getTrailIdentifier = (trail) => {
-    return trail.slug || trail.id || trail._id;
+  // Every identifier one trail can be known by: the same place is "osm-node-1" in
+  // search results but a Mongo _id (plus slug / externalId) once it has been saved.
+  const getTrailAliases = (trail, extraId) => {
+    const ids = [extraId, trail?._id, trail?.id, trail?.slug, trail?.externalId]
+      .filter((value) => value != null && value !== '')
+      .map(String);
+    return [...new Set(ids)];
   };
+
+  const matchesAny = (group, aliases) => aliases.some((alias) => group.includes(alias));
+
+  // Flat list of every favorited identifier
+  const favorites = useMemo(() => favoriteGroups.flat(), [favoriteGroups]);
 
   // Load popular trails on mount
   useEffect(() => {
@@ -38,23 +48,34 @@ export function TrailProvider({ children }) {
 
   // Load user favorites from backend when logged in
   useEffect(() => {
+    let cancelled = false;
+
     const loadFavorites = async () => {
+      setFavoritesReady(false);
       if (user) {
         try {
           const res = await favoriteService.getFavorites();
-          if (res.success && res.data) {
-            setFavorites(res.data.map((t) => t._id || t.id || t.slug));
+          if (!cancelled && res.success && res.data) {
+            setFavoriteGroups(res.data.map((t) => getTrailAliases(t)));
+            setFavoritesReady(true);
           }
         } catch (err) {
           console.warn('Failed to load favorites:', err.message);
         }
       } else {
-        setFavorites([]);
+        setFavoriteGroups([]);
       }
     };
 
     loadFavorites();
-  }, [user]);
+    return () => {
+      cancelled = true;
+    };
+  }, [user?._id]);
+
+  const isFavorite = (trailId) => {
+    return trailId != null && favorites.includes(String(trailId));
+  };
 
   const toggleFavorite = async (trailId, trailData = {}) => {
     if (!user) {
@@ -62,33 +83,38 @@ export function TrailProvider({ children }) {
       return false;
     }
 
-    const isFav = favorites.includes(trailId);
+    const aliases = getTrailAliases(trailData, trailId);
+    const previousGroups = favoriteGroups;
+    const isFav = previousGroups.some((group) => matchesAny(group, aliases));
+
     if (isFav) {
-      setFavorites((prev) => prev.filter((id) => id !== trailId));
+      setFavoriteGroups((prev) => prev.filter((group) => !matchesAny(group, aliases)));
       try {
         await favoriteService.removeFavorite(trailId);
       } catch (err) {
         // Revert on failure
-        setFavorites((prev) => [...prev, trailId]);
+        setFavoriteGroups(previousGroups);
+        return false;
       }
     } else {
-      setFavorites((prev) => [...prev, trailId]);
+      setFavoriteGroups((prev) => [...prev, aliases]);
       try {
-        await favoriteService.addFavorite(trailId, trailData);
+        const res = await favoriteService.addFavorite(trailId, trailData);
+        // The saved record carries the database identifiers for this trail
+        const savedAliases = [...new Set([...aliases, ...getTrailAliases(res.data)])];
+        setFavoriteGroups((prev) => prev.map((group) => (group === aliases ? savedAliases : group)));
       } catch (err) {
         // Revert on failure
-        setFavorites((prev) => prev.filter((id) => id !== trailId));
+        setFavoriteGroups((prev) => prev.filter((group) => group !== aliases));
+        return false;
       }
     }
+    return true;
   };
 
-
-  const isFavorite = (trailId) => {
-    return favorites.includes(trailId);
-  };
-
-  const removeFavorite = async (trailId) => {
-    setFavorites((prev) => prev.filter((id) => id !== trailId));
+  const removeFavorite = async (trailId, trailData = {}) => {
+    const aliases = getTrailAliases(trailData, trailId);
+    setFavoriteGroups((prev) => prev.filter((group) => !matchesAny(group, aliases)));
     if (user) {
       try {
         await favoriteService.removeFavorite(trailId);
@@ -113,21 +139,35 @@ export function TrailProvider({ children }) {
         return res;
       } catch (error) {
         setLoading(false);
-        return { success: false, message: error.message || 'Unable to load trails.', data: [], results: [] };
+        return {
+          success: false,
+          message: error.message || 'Unable to load trails.',
+          code: error.code,
+          data: [],
+          results: []
+        };
       }
     },
     [userLocation]
   );
 
-  const fetchNearbyTrails = async (lat, lng, radius = 25) => {
+  const fetchNearbyTrails = async (lat, lng, radius = 25, filters = {}) => {
     setLoading(true);
     try {
-      const res = await trailService.getNearbyTrails(lat, lng, radius);
+      const res = await trailService.getNearbyTrails(lat, lng, radius, filters);
       setLoading(false);
       return res;
     } catch (error) {
       setLoading(false);
-      return { success: false, message: error.message || 'Unable to load nearby trails.', data: [], results: [] };
+      return {
+        success: false,
+        status: error.status,
+        code: error.code,
+        diagnostics: error.data?.diagnostics,
+        message: error.message || 'Unable to load nearby trails.',
+        data: [],
+        results: []
+      };
     }
   };
 
@@ -162,7 +202,7 @@ export function TrailProvider({ children }) {
     const res = await trailService.deleteTrail(id);
     if (res.success) {
       setPopularTrails((prev) => prev.filter((t) => t._id !== id && t.id !== id));
-      setFavorites((prev) => prev.filter((favId) => favId !== id));
+      setFavoriteGroups((prev) => prev.filter((group) => !group.includes(String(id))));
     }
     return res;
   };
@@ -176,6 +216,7 @@ export function TrailProvider({ children }) {
       value={{
         popularTrails,
         favorites,
+        favoritesReady,
         userLocation,
         setUserLocation,
         loading,

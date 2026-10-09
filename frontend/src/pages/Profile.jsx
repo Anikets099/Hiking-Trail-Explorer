@@ -517,8 +517,8 @@ export default function Profile() {
                       key={trail._id || trail.slug || trail.id}
                       trail={trail}
                       showRemoveBtn
-                      onRemove={async (id) => {
-                        await removeFavorite(id);
+                      onRemove={async (id, trail) => {
+                        await removeFavorite(id, trail);
                         setFavoriteTrails((prev) => {
                           const updated = prev.filter((t) => t._id !== id && t.slug !== id);
                           setProfileStats((s) => ({ ...s, favoritesCount: updated.length }));

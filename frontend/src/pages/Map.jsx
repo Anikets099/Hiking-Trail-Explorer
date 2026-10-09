@@ -6,22 +6,39 @@ import { trailService } from "../services/trailService";
 import { useTrails } from "../context/TrailContext";
 import { Search, Navigation, MapPin } from "lucide-react";
 
+// Trail and place names come from OpenStreetMap contributors, so they must be escaped
+// before being placed into Leaflet's HTML strings.
+const escapeHtml = (value) =>
+  String(value ?? "").replace(/[&<>"']/g, (char) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]
+  ));
+
 export default function MapPage() {
   const { userLocation, setUserLocation } = useTrails();
   const [searchParams, setSearchParams] = useSearchParams();
   const targetTrailId = searchParams.get("trail");
+  const targetName = searchParams.get("name") || "";
+  const targetCity = searchParams.get("city") || "";
+  const targetLat = searchParams.get("lat");
+  const targetLng = searchParams.get("lng");
 
   const mapContainerRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const trailMarkersRef = useRef({});
   const searchLocationMarkerRef = useRef(null);
   const userLocationMarkerRef = useRef(null);
+  const requestIdRef = useRef(0);
+  // Set once "Use My Location" is pressed with no search active: browse around the user
+  const nearbyCenterRef = useRef(null);
 
   const [trails, setTrails] = useState([]);
   const [searchLocation, setSearchLocation] = useState(null);
   const [userToSearchDistance, setUserToSearchDistance] = useState(null);
+  const [searchError, setSearchError] = useState("");
   const [locationSearch, setLocationSearch] = useState("");
   const [locating, setLocating] = useState(false);
+  // Trail requested through ?trail= that is not part of the currently loaded list
+  const [targetTrail, setTargetTrail] = useState(null);
 
   // Initialize Leaflet Map
   useEffect(() => {
@@ -58,7 +75,22 @@ export default function MapPage() {
 
   // Fetch trails dynamically from backend
   const fetchMapTrails = async (query = "") => {
+    // Only the most recent request may update the map; older responses are dropped
+    const requestId = ++requestIdRef.current;
+    const isStale = () => requestId !== requestIdRef.current;
+    const nearby = nearbyCenterRef.current;
+
+    setSearchError("");
     try {
+      if (!query.trim() && nearby) {
+        const res = await trailService.getNearbyTrails(nearby.lat, nearby.lng, 30);
+        if (isStale()) return;
+        setTrails(res.results || res.data || []);
+        setSearchLocation({ name: "Your Current Area", latitude: nearby.lat, longitude: nearby.lng });
+        setUserToSearchDistance(null);
+        return;
+      }
+
       const params = {};
       if (query.trim()) params.search = query.trim();
       if (userLocation) {
@@ -67,19 +99,53 @@ export default function MapPage() {
       }
 
       const res = await trailService.getTrails(params);
+      if (isStale()) return;
       if (res.success && res.data) {
         setTrails(res.data);
         setSearchLocation(res.searchLocation || res.location || null);
         setUserToSearchDistance(res.distanceFromUserToSearch || null);
+      } else {
+        setTrails([]);
+        setSearchLocation(null);
+        setUserToSearchDistance(null);
+        setSearchError(res.message || "Trail search did not return a valid response.");
       }
     } catch (e) {
-      console.warn("Failed to load map trails:", e);
+      if (isStale()) return;
+      setTrails([]);
+      setSearchLocation(null);
+      setUserToSearchDistance(null);
+      setSearchError(`${e.message || "Unable to connect to the trail search service."}${e.code ? ` (${e.code})` : ""}`);
+      console.error("Failed to load map trails:", e);
     }
   };
 
   useEffect(() => {
     fetchMapTrails(locationSearch);
   }, [userLocation]);
+
+  // "View on Map" can point at a trail outside the loaded list (e.g. a searched
+  // OpenStreetMap place), so look that trail up on its own.
+  useEffect(() => {
+    if (!targetTrailId) {
+      setTargetTrail(null);
+      return;
+    }
+
+    let cancelled = false;
+    trailService
+      .getTrailById(targetTrailId, { name: targetName, city: targetCity, lat: targetLat, lng: targetLng })
+      .then((res) => {
+        if (!cancelled) setTargetTrail(res.data || null);
+      })
+      .catch(() => {
+        if (!cancelled) setTargetTrail(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [targetTrailId, targetName, targetCity, targetLat, targetLng]);
 
   // Render Markers on Map (User Location + Search Location + Trail Markers)
   useEffect(() => {
@@ -119,7 +185,7 @@ export default function MapPage() {
             transform: translate(-50%, -50%);
           ">
             <span style="font-size: 14px;">📍</span>
-            <span>Search: ${searchLocation.name}</span>
+            <span>Search: ${escapeHtml(searchLocation.name)}</span>
           </div>
         `,
         iconSize: [140, 32],
@@ -134,8 +200,8 @@ export default function MapPage() {
         .bindPopup(`
           <div style="font-family: 'Plus Jakarta Sans', sans-serif; padding: 4px;">
             <div style="font-size: 11px; font-weight: 700; color: #16a34a; text-transform: uppercase;">Search Location</div>
-            <h4 style="margin: 2px 0 6px 0; font-size: 14px; color: #0f172a;">${searchLocation.name}</h4>
-            ${userToSearchDistance ? `<div style="font-size: 12px; color: #475569; font-weight: 600;">📍 ${userToSearchDistance} from your location</div>` : ''}
+            <h4 style="margin: 2px 0 6px 0; font-size: 14px; color: #0f172a;">${escapeHtml(searchLocation.name)}</h4>
+            ${userToSearchDistance ? `<div style="font-size: 12px; color: #475569; font-weight: 600;">📍 ${escapeHtml(userToSearchDistance)} from your location</div>` : ''}
           </div>
         `);
 
@@ -195,11 +261,19 @@ export default function MapPage() {
     }
 
     // 4. Render Trail Markers
-    trails.forEach((trail) => {
+    const isTarget = (t) => t.slug === targetTrailId || t._id === targetTrailId || t.id === targetTrailId;
+    const mapTrails =
+      targetTrailId && targetTrail && isTarget(targetTrail) && !trails.some(isTarget)
+        ? [...trails, targetTrail]
+        : trails;
+
+    mapTrails.forEach((trail) => {
       if (trail.latitude == null || trail.longitude == null) return;
 
       const linkId = trail.slug || trail.id || trail._id;
-      const displayImg = trail.imageUrl || trail.image || "/images/default-trail.jpg";
+      const trailName = escapeHtml(trail.name);
+      const displayImg = escapeHtml(trail.imageUrl || trail.image || "/images/default-trail.jpg");
+      const detailsUrl = `/trail/${encodeURIComponent(linkId)}?name=${encodeURIComponent(trail.name || '')}&city=${encodeURIComponent(trail.city || searchLocation?.name || '')}&lat=${trail.latitude}&lng=${trail.longitude}`;
       const distanceText =
         trail.distanceFromSearchText ||
         (trail.distanceFromSearch ? `${trail.distanceFromSearch} from ${trail.searchOriginName || searchLocation?.name || 'search'}` : null);
@@ -224,7 +298,7 @@ export default function MapPage() {
             transform: translate(-50%, -50%);
           ">
             <span style="color: #ef4444; font-size: 13px;">📍</span>
-            <span>${trail.name}</span>
+            <span>${trailName}</span>
           </div>
         `,
         iconSize: [120, 30],
@@ -233,15 +307,15 @@ export default function MapPage() {
 
       const popupContent = `
         <div style="width: 200px; font-family: 'Plus Jakarta Sans', sans-serif;">
-          <img src="${displayImg}" alt="${trail.name}" style="width: 100%; height: 95px; object-fit: cover; border-radius: 6px; margin-bottom: 6px;" onerror="this.onerror=null; this.src='/images/default-trail.jpg';" />
-          <h4 style="font-size: 14px; font-weight: 700; margin: 0 0 4px 0; color: #0f172a;">${trail.name}</h4>
+          <img src="${displayImg}" alt="${trailName}" style="width: 100%; height: 95px; object-fit: cover; border-radius: 6px; margin-bottom: 6px;" onerror="this.onerror=null; this.src='/images/default-trail.jpg';" />
+          <h4 style="font-size: 14px; font-weight: 700; margin: 0 0 4px 0; color: #0f172a;">${trailName}</h4>
 
           <div style="display: flex; justify-content: space-between; font-size: 12px; color: #64748b; margin-bottom: 6px;">
-            <span>⭐ ${trail.rating || 4.8}</span>
-            <span>📏 ${trail.distance || '5.0 km'}</span>
+            <span>⭐ ${trail.rating ? Number(trail.rating).toFixed(1) : 'New'}</span>
+            <span>📏 ${escapeHtml(trail.distance || 'Not listed')}</span>
           </div>
-          ${distanceText ? `<div style="font-size: 11px; color: #2e7d32; font-weight: 700; margin-bottom: 6px;">📍 ${distanceText}</div>` : ''}
-          <a href="/trail/${linkId}?name=${encodeURIComponent(trail.name || '')}&city=${encodeURIComponent(trail.city || searchLocation?.name || '')}" style="
+          ${distanceText ? `<div style="font-size: 11px; color: #2e7d32; font-weight: 700; margin-bottom: 6px;">📍 ${escapeHtml(distanceText)}</div>` : ''}
+          <a href="${escapeHtml(detailsUrl)}" style="
             display: block;
             text-align: center;
             background: #2e7d32;
@@ -264,17 +338,17 @@ export default function MapPage() {
     });
 
     // 5. Fit bounds or fly to target
-    if (targetTrailId) {
-      const match = trails.find((t) => t.slug === targetTrailId || t._id === targetTrailId || t.id === targetTrailId);
-      if (match) {
-        map.flyTo([match.latitude, match.longitude], 12, { duration: 1.5 });
-        const m = trailMarkersRef.current[match._id || match.slug || match.id];
-        if (m) m.openPopup();
-      }
+    const match = targetTrailId
+      ? mapTrails.find((t) => isTarget(t) && t.latitude != null && t.longitude != null)
+      : null;
+    if (match) {
+      map.flyTo([match.latitude, match.longitude], 12, { duration: 1.5 });
+      const m = trailMarkersRef.current[match._id || match.slug || match.id];
+      if (m) m.openPopup();
     } else if (allBounds.length > 0) {
       map.fitBounds(allBounds, { padding: [50, 50], maxZoom: 13 });
     }
-  }, [trails, searchLocation, userLocation, targetTrailId]);
+  }, [trails, searchLocation, userLocation, userToSearchDistance, targetTrailId, targetTrail]);
 
   // Handle Browser Geolocation ("Use My Location")
   const handleMyLocation = () => {
@@ -285,31 +359,19 @@ export default function MapPage() {
 
     setLocating(true);
     navigator.geolocation.getCurrentPosition(
-      async (position) => {
+      (position) => {
         const { latitude, longitude } = position.coords;
-        // Keep user coordinates in session state (separate from searchLocation)
-        setUserLocation({ lat: latitude, lng: longitude });
         setLocating(false);
-
-        // If a search query is active, reload with user coordinates to get Distance A
-        if (locationSearch && locationSearch.trim()) {
-          fetchMapTrails(locationSearch.trim());
-        } else {
-          // If no search is active, discover nearby trails around user's GPS
-          try {
-            const res = await trailService.getNearbyTrails(latitude, longitude, 30);
-            if (res.success && res.data) {
-              setTrails(res.data);
-              setSearchLocation({
-                name: "Your Current Area",
-                latitude,
-                longitude
-              });
-            }
-          } catch (e) {}
+        // With no search active, discover trails around the user's GPS position
+        if (!locationSearch.trim()) {
+          nearbyCenterRef.current = { lat: latitude, lng: longitude };
         }
+        // Keep user coordinates in session state (separate from searchLocation).
+        // The userLocation effect reloads the map: an active search gains Distance A,
+        // otherwise nearby trails are loaded.
+        setUserLocation({ lat: latitude, lng: longitude });
       },
-      (error) => {
+      () => {
         setLocating(false);
         alert("Unable to retrieve your location. Please enable location permissions.");
       },
@@ -374,6 +436,22 @@ export default function MapPage() {
           </div>
         )}
       </div>
+
+      {searchError && (
+        <p
+          role="alert"
+          style={{
+            margin: "12px 0",
+            padding: "12px 16px",
+            color: "#991b1b",
+            backgroundColor: "#fef2f2",
+            border: "1px solid #fecaca",
+            borderRadius: "var(--radius-md)"
+          }}
+        >
+          {searchError}
+        </p>
+      )}
 
       {/* Interactive Leaflet Map */}
       <div className="map-wrapper">

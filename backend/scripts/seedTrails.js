@@ -514,8 +514,13 @@ const trailsSeedData = [
 
 async function seedDatabase() {
   try {
-    const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/hiking-trail-explorer';
-    console.log(`Connecting to MongoDB: ${mongoUri}`);
+    const mongoUri = process.env.MONGODB_URI;
+
+    if (!mongoUri) {
+      throw new Error('MONGODB_URI is not defined. Check the backend .env file.');
+    }
+
+    console.log('Connecting to MongoDB using MONGODB_URI from the backend .env file');
     await mongoose.connect(mongoUri);
 
     console.log('Clearing existing collections...');

@@ -8,7 +8,7 @@ import { Heart, Compass } from "lucide-react";
 
 export default function Favorites() {
   const { user } = useAuth();
-  const { favorites, removeFavorite } = useTrails();
+  const { isFavorite, favoritesReady, removeFavorite } = useTrails();
   const [favoriteTrails, setFavoriteTrails] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -33,12 +33,17 @@ export default function Favorites() {
     };
 
     loadFavorites();
-  }, [user, favorites]);
+  }, [user?._id]);
 
-  const handleRemove = async (trailId) => {
-    await removeFavorite(trailId);
+  const handleRemove = async (trailId, trail) => {
+    await removeFavorite(trailId, trail);
     setFavoriteTrails((prev) => prev.filter((t) => (t._id !== trailId && t.slug !== trailId && t.id !== trailId)));
   };
+
+  // Hide a card as soon as it is un-favorited through its heart button
+  const visibleTrails = favoritesReady
+    ? favoriteTrails.filter((t) => isFavorite(t._id || t.id || t.slug))
+    : favoriteTrails;
 
   if (!user) {
     return (
@@ -93,9 +98,9 @@ export default function Favorites() {
           />
           <p style={{ color: "var(--text-muted)" }}>Loading your favorites...</p>
         </div>
-      ) : favoriteTrails.length > 0 ? (
+      ) : visibleTrails.length > 0 ? (
         <div className="trails-grid trails-grid-4">
-          {favoriteTrails.map((trail) => (
+          {visibleTrails.map((trail) => (
             <TrailCard
               key={trail._id || trail.id || trail.slug}
               trail={trail}

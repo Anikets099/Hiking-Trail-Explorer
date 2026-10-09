@@ -26,7 +26,9 @@ const fileFilter = (req, file, cb) => {
   if (allowedMimeTypes.includes(file.mimetype) && allowedExts.includes(ext)) {
     cb(null, true);
   } else {
-    cb(new Error('Invalid file format. Only JPG, PNG, and WEBP images are allowed.'), false);
+    const error = new Error('Invalid file format. Only JPG, PNG, and WEBP images are allowed.');
+    error.statusCode = 400;
+    cb(error, false);
   }
 };
 

@@ -31,7 +31,7 @@ export default function AdminDashboard() {
   const loadTrails = async () => {
     setLoading(true);
     try {
-      const res = await trailService.getTrails();
+      const res = await trailService.getAllTrails();
       if (res.success && res.data) {
         setTrails(res.data);
       }

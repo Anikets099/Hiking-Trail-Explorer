@@ -202,7 +202,10 @@ exports.recordTrailExplored = async (req, res, next) => {
       } catch (err) {
         trail = await Trail.findOne({ slug });
       }
-    } else if (/^osm/i.test(trail.name) && cleanName && !/^osm/i.test(cleanName)) {
+    } else if (
+      (/^osm/i.test(trail.name) || trail.name === 'Scenic Nature Trail') &&
+      cleanName && cleanName !== trail.name && !/^osm/i.test(cleanName)
+    ) {
       trail.name = cleanName;
       if (cleanCity && cleanCity !== 'India') trail.city = cleanCity;
       if (cleanImg && !cleanImg.includes('rajgad') && (!trail.imageUrl || trail.imageUrl.includes('rajgad') || trail.imageUrl.includes('default'))) {
@@ -246,8 +249,8 @@ exports.updateUserProfile = async (req, res, next) => {
     const { name, bio } = req.body;
 
     const fieldsToUpdate = {};
-    if (name) fieldsToUpdate.name = name.trim();
-    if (bio !== undefined) fieldsToUpdate.bio = bio.trim();
+    if (typeof name === 'string' && name.trim()) fieldsToUpdate.name = name.trim();
+    if (typeof bio === 'string') fieldsToUpdate.bio = bio.trim();
 
     const updatedUser = await User.findByIdAndUpdate(
       req.user._id,

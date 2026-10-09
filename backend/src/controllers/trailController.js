@@ -2,6 +2,16 @@ const Trail = require('../models/Trail');
 const { calculateDistance } = require('../utils/distance');
 const { searchWikimediaImage } = require('../services/wikimediaService');
 
+// Escapes user input so it is matched literally inside a RegExp
+const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Parses a coordinate query/body value, returning null when it is missing or not a number
+const parseCoordinate = (value) => {
+  if (value == null || value === '') return null;
+  const num = parseFloat(value);
+  return Number.isFinite(num) ? num : null;
+};
+
 // @desc    Get all trails with search, filters, sorting and distance calculation
 // @route   GET /api/trails
 // @access  Public
@@ -12,9 +22,9 @@ exports.getTrails = async (req, res, next) => {
     const query = {};
 
     // Dynamic database search across name, city, state, description
-    if (search && search.trim()) {
+    if (typeof search === 'string' && search.trim()) {
       const searchTerm = search.trim();
-      const regex = new RegExp(searchTerm, 'i');
+      const regex = new RegExp(escapeRegex(searchTerm), 'i');
       query.$or = [
         { name: regex },
         { city: regex },
@@ -25,7 +35,7 @@ exports.getTrails = async (req, res, next) => {
 
     // Difficulty filter
     if (difficulty && difficulty !== 'all') {
-      query.difficulty = new RegExp(`^${difficulty}$`, 'i');
+      query.difficulty = new RegExp(`^${escapeRegex(String(difficulty))}$`, 'i');
     }
 
     // Distance filter
@@ -40,12 +50,12 @@ exports.getTrails = async (req, res, next) => {
     let trails = await Trail.find(query);
 
     // If user coordinates provided, calculate geodesic distance
-    const userLat = lat ? parseFloat(lat) : null;
-    const userLng = lng ? parseFloat(lng) : null;
+    const userLat = parseCoordinate(lat);
+    const userLng = parseCoordinate(lng);
 
     let processedTrails = trails.map((trail) => {
       const trailObj = trail.toObject();
-      if (userLat != null && userLng != null && trail.latitude && trail.longitude) {
+      if (userLat != null && userLng != null && trail.latitude != null && trail.longitude != null) {
         const distKm = calculateDistance(userLat, userLng, trail.latitude, trail.longitude);
         trailObj.distanceFromUserKm = distKm;
         trailObj.distanceFromUser = distKm != null ? `${distKm} km` : null;
@@ -56,7 +66,7 @@ exports.getTrails = async (req, res, next) => {
     // Sorting
     if (sortBy === 'distance') {
       if (userLat != null && userLng != null) {
-        processedTrails.sort((a, b) => (a.distanceFromUserKm || 99999) - (b.distanceFromUserKm || 99999));
+        processedTrails.sort((a, b) => (a.distanceFromUserKm ?? 99999) - (b.distanceFromUserKm ?? 99999));
       } else {
         processedTrails.sort((a, b) => (a.distanceNum || 0) - (b.distanceNum || 0));
       }
@@ -91,12 +101,12 @@ exports.getPopularTrails = async (req, res, next) => {
       popularTrails = await Trail.find({}).sort({ rating: -1, reviewCount: -1 }).limit(6);
     }
 
-    const userLat = lat ? parseFloat(lat) : null;
-    const userLng = lng ? parseFloat(lng) : null;
+    const userLat = parseCoordinate(lat);
+    const userLng = parseCoordinate(lng);
 
     const data = popularTrails.map((t) => {
       const obj = t.toObject();
-      if (userLat != null && userLng != null && t.latitude && t.longitude) {
+      if (userLat != null && userLng != null && t.latitude != null && t.longitude != null) {
         const distKm = calculateDistance(userLat, userLng, t.latitude, t.longitude);
         obj.distanceFromUserKm = distKm;
         obj.distanceFromUser = distKm != null ? `${distKm} km` : null;
@@ -176,8 +186,18 @@ exports.getTrailById = async (req, res, next) => {
       const osmType = parts[1];
       const osmId = parts[2];
 
-      const cleanName = req.query.name || 'Scenic Trail';
-      const city = req.query.city || '';
+      // A copy is saved once someone favorites, completes, explores or reviews this OSM place
+      const stored = await Trail.findOne({
+        $or: [{ slug: identifier.toLowerCase() }, { externalId: identifier }]
+      });
+
+      const queryName = typeof req.query.name === 'string' ? req.query.name.trim() : '';
+      const queryCity = typeof req.query.city === 'string' ? req.query.city.trim() : '';
+      const cleanName = queryName || (stored ? stored.name : '') || 'Scenic Trail';
+      const city = queryCity || (stored ? stored.city : '') || '';
+      const latitude = parseCoordinate(req.query.lat) ?? (stored ? stored.latitude : null);
+      const longitude = parseCoordinate(req.query.lng) ?? (stored ? stored.longitude : null);
+      const hasReviews = Boolean(stored && stored.reviewCount > 0);
 
       const wikiInfo = await searchWikimediaImage(cleanName, city);
 
@@ -189,13 +209,15 @@ exports.getTrailById = async (req, res, next) => {
         city: city || 'Local Region',
         state: 'India',
         country: 'India',
+        latitude,
+        longitude,
         difficulty: 'Moderate',
-        distance: '5.0 km',
-        distanceNum: 5.0,
-        elevation: '800 m',
-        elevationNum: 800,
-        hikingTime: '2-3 hrs',
-        bestTime: 'Oct - Mar',
+        distance: null,
+        distanceNum: null,
+        elevation: null,
+        elevationNum: null,
+        hikingTime: null,
+        bestTime: null,
         description: `Discovered trail and outdoor nature spot near ${city || 'the area'} via OpenStreetMap.`,
         safetyTips: [
           'Carry enough water and energy snacks',
@@ -208,8 +230,8 @@ exports.getTrailById = async (req, res, next) => {
         imageAttribution: wikiInfo.imageAttribution,
         sourceUrl: wikiInfo.sourceUrl || `https://www.openstreetmap.org/${osmType}/${osmId}`,
         source: 'OpenStreetMap',
-        rating: 4.8,
-        reviewCount: 0
+        rating: hasReviews ? stored.rating : null,
+        reviewCount: hasReviews ? stored.reviewCount : 0
       };
 
       return res.status(200).json({
@@ -302,10 +324,19 @@ exports.createTrail = async (req, res, next) => {
     if (!finalImageUrl || finalImageUrl.trim() === '') {
       const wikiData = await searchWikimediaImage(name, city || 'Maharashtra');
       finalImageUrl = wikiData.imageUrl;
-      imageAuthor = wikiData.author;
-      imageLicense = wikiData.license;
-      imageAttribution = wikiData.attribution;
-      sourceUrl = wikiData.sourceUrl;
+      imageAuthor = wikiData.imageAuthor || '';
+      imageLicense = wikiData.imageLicense || '';
+      imageAttribution = wikiData.imageAttribution || '';
+      sourceUrl = wikiData.sourceUrl || '';
+    }
+
+    const parsedLat = parseCoordinate(latitude);
+    const parsedLng = parseCoordinate(longitude);
+    if (parsedLat == null || parsedLng == null || Math.abs(parsedLat) > 90 || Math.abs(parsedLng) > 180) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid latitude (-90 to 90) and longitude (-180 to 180).'
+      });
     }
 
     const trail = await Trail.create({
@@ -313,11 +344,11 @@ exports.createTrail = async (req, res, next) => {
       city: city ? city.trim() : 'Maharashtra',
       state: state ? state.trim() : 'Maharashtra',
       country: country || 'India',
-      latitude: parseFloat(latitude),
-      longitude: parseFloat(longitude),
+      latitude: parsedLat,
+      longitude: parsedLng,
       location: {
         type: 'Point',
-        coordinates: [parseFloat(longitude), parseFloat(latitude)]
+        coordinates: [parsedLng, parsedLat]
       },
       difficulty: difficulty || 'Moderate',
       distance: distance || `${distNum} km`,
@@ -369,10 +400,22 @@ exports.updateTrail = async (req, res, next) => {
     if (req.body.elevation) {
       req.body.elevationNum = parseInt(req.body.elevation) || trail.elevationNum;
     }
-    if (req.body.latitude && req.body.longitude) {
+    // Keep the GeoJSON point in sync with latitude/longitude; never accept it from the client directly
+    delete req.body.location;
+    if (req.body.latitude != null || req.body.longitude != null) {
+      const newLat = parseCoordinate(req.body.latitude ?? trail.latitude);
+      const newLng = parseCoordinate(req.body.longitude ?? trail.longitude);
+      if (newLat == null || newLng == null || Math.abs(newLat) > 90 || Math.abs(newLng) > 180) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please provide a valid latitude (-90 to 90) and longitude (-180 to 180).'
+        });
+      }
+      req.body.latitude = newLat;
+      req.body.longitude = newLng;
       req.body.location = {
         type: 'Point',
-        coordinates: [parseFloat(req.body.longitude), parseFloat(req.body.latitude)]
+        coordinates: [newLng, newLat]
       };
     }
 

@@ -1,6 +1,33 @@
 const Review = require('../models/Review');
 const Trail = require('../models/Trail');
 
+// Recalculates a trail's average rating & review count from its current reviews
+const syncTrailRating = async (trailId) => {
+  const reviews = await Review.find({ trail: trailId }).select('rating');
+  if (reviews.length === 0) {
+    await Trail.findByIdAndUpdate(trailId, { rating: 4.5, reviewCount: 0 });
+    return;
+  }
+  const avg = reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length;
+  await Trail.findByIdAndUpdate(trailId, {
+    rating: parseFloat(avg.toFixed(1)),
+    reviewCount: reviews.length
+  });
+};
+
+// Finds a trail by Mongo id, slug, or OpenStreetMap identifier
+const findTrailByIdentifier = async (identifier) => {
+  const cleanId = String(identifier || '').trim();
+  if (!cleanId) return null;
+  if (/^[0-9a-fA-F]{24}$/.test(cleanId)) {
+    const byId = await Trail.findById(cleanId);
+    if (byId) return byId;
+  }
+  return Trail.findOne({
+    $or: [{ slug: cleanId.toLowerCase() }, { externalId: cleanId }]
+  });
+};
+
 // @desc    Get reviews for a trail
 // @route   GET /api/trails/:trailId/reviews
 // @access  Public
@@ -9,10 +36,7 @@ exports.getTrailReviews = async (req, res, next) => {
     const { trailId } = req.params;
 
     // Find trail by id or slug
-    let trail = await Trail.findById(trailId).catch(() => null);
-    if (!trail) {
-      trail = await Trail.findOne({ slug: trailId.toLowerCase().trim() });
-    }
+    const trail = await findTrailByIdentifier(trailId);
 
     if (!trail) {
       return res.status(404).json({
@@ -43,7 +67,7 @@ exports.createReview = async (req, res, next) => {
     const { trailId } = req.params;
     const { rating, comment } = req.body;
 
-    if (!rating || !comment) {
+    if (!rating || typeof comment !== 'string' || !comment.trim()) {
       return res.status(400).json({
         success: false,
         message: 'Please provide both rating (1-5) and review comment.'
@@ -58,10 +82,7 @@ exports.createReview = async (req, res, next) => {
       });
     }
 
-    let trail = await Trail.findById(trailId).catch(() => null);
-    if (!trail) {
-      trail = await Trail.findOne({ slug: trailId.toLowerCase().trim() });
-    }
+    const trail = await findTrailByIdentifier(trailId);
 
     if (!trail) {
       return res.status(404).json({
@@ -78,14 +99,7 @@ exports.createReview = async (req, res, next) => {
     });
 
     // Recalculate trail average rating & review count
-    const allReviews = await Review.find({ trail: trail._id });
-    const avgRating = (
-      allReviews.reduce((sum, r) => sum + r.rating, 0) / allReviews.length
-    ).toFixed(1);
-
-    trail.rating = parseFloat(avgRating);
-    trail.reviewCount = allReviews.length;
-    await trail.save();
+    await syncTrailRating(trail._id);
 
     const populatedReview = await Review.findById(review._id).populate('user', 'name profileImage');
 
@@ -121,10 +135,20 @@ exports.updateReview = async (req, res, next) => {
     }
 
     const { rating, comment } = req.body;
-    if (rating) review.rating = parseInt(rating, 10);
-    if (comment) review.comment = comment.trim();
+    if (rating != null && rating !== '') {
+      const ratingNum = parseInt(rating, 10);
+      if (isNaN(ratingNum) || ratingNum < 1 || ratingNum > 5) {
+        return res.status(400).json({
+          success: false,
+          message: 'Rating must be an integer between 1 and 5.'
+        });
+      }
+      review.rating = ratingNum;
+    }
+    if (typeof comment === 'string' && comment.trim()) review.comment = comment.trim();
 
     await review.save();
+    await syncTrailRating(review.trail);
 
     res.status(200).json({
       success: true,
@@ -161,21 +185,7 @@ exports.deleteReview = async (req, res, next) => {
     await review.deleteOne();
 
     // Recalculate trail average rating
-    const remainingReviews = await Review.find({ trail: trailId });
-    if (remainingReviews.length > 0) {
-      const avg = (
-        remainingReviews.reduce((sum, r) => sum + r.rating, 0) / remainingReviews.length
-      ).toFixed(1);
-      await Trail.findByIdAndUpdate(trailId, {
-        rating: parseFloat(avg),
-        reviewCount: remainingReviews.length
-      });
-    } else {
-      await Trail.findByIdAndUpdate(trailId, {
-        rating: 4.5,
-        reviewCount: 0
-      });
-    }
+    await syncTrailRating(trailId);
 
     res.status(200).json({
       success: true,

@@ -20,16 +20,17 @@ export default function TrailFormModal({ isOpen, onClose, onSave, editingTrail }
     if (editingTrail) {
       setFormData({
         name: editingTrail.name || "",
-        location: editingTrail.location || "Maharashtra, India",
-        latitude: editingTrail.latitude || 18.5204,
-        longitude: editingTrail.longitude || 73.8567,
+        // `location` on a saved trail is a GeoJSON point, so build the text from city & state
+        location: [editingTrail.city, editingTrail.state].filter(Boolean).join(", ") || "Maharashtra, India",
+        latitude: editingTrail.latitude ?? 18.5204,
+        longitude: editingTrail.longitude ?? 73.8567,
         distance: editingTrail.distance || "5.0 km",
         difficulty: editingTrail.difficulty || "Moderate",
         elevation: editingTrail.elevation || "1,200 m",
         hikingTime: editingTrail.hikingTime || "2-3 hrs",
         bestTime: editingTrail.bestTime || "Oct - Mar",
         description: editingTrail.description || "",
-        image: editingTrail.image || "/images/default-trail.jpg"
+        image: editingTrail.imageUrl || editingTrail.image || "/images/default-trail.jpg"
       });
     } else {
       setFormData({
@@ -54,7 +55,18 @@ export default function TrailFormModal({ isOpen, onClose, onSave, editingTrail }
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!formData.name.trim()) return;
-    onSave(formData);
+    if (!Number.isFinite(formData.latitude) || !Number.isFinite(formData.longitude)) return;
+
+    // The API stores city / state / imageUrl rather than the form's combined fields
+    const { location, image, ...rest } = formData;
+    const [city, ...stateParts] = location.split(",").map((part) => part.trim()).filter(Boolean);
+    onSave({
+      ...rest,
+      name: formData.name.trim(),
+      city: city || "Maharashtra",
+      state: stateParts.join(", "),
+      imageUrl: image.trim()
+    });
     onClose();
   };
 
@@ -104,7 +116,9 @@ export default function TrailFormModal({ isOpen, onClose, onSave, editingTrail }
                 required
                 className="form-control"
                 placeholder="18.2562"
-                value={formData.latitude}
+                min="-90"
+                max="90"
+                value={Number.isFinite(formData.latitude) ? formData.latitude : ""}
                 onChange={(e) => setFormData({ ...formData, latitude: parseFloat(e.target.value) })}
               />
             </div>
@@ -116,7 +130,9 @@ export default function TrailFormModal({ isOpen, onClose, onSave, editingTrail }
                 required
                 className="form-control"
                 placeholder="73.6826"
-                value={formData.longitude}
+                min="-180"
+                max="180"
+                value={Number.isFinite(formData.longitude) ? formData.longitude : ""}
                 onChange={(e) => setFormData({ ...formData, longitude: parseFloat(e.target.value) })}
               />
             </div>
@@ -197,6 +213,7 @@ export default function TrailFormModal({ isOpen, onClose, onSave, editingTrail }
             <label className="form-label">Description</label>
             <textarea
               rows="3"
+              required
               className="form-control"
               placeholder="Trail overview and highlights..."
               value={formData.description}
